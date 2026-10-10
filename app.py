@@ -158,7 +158,7 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
         "xxlabs_bta_version": anchor.get("governance_version", "CIAT25.1"),
         "anchor_id": anchor["anchor_id"],
         "anchor_hash": anchor_hash(anchor),
-        "timestamp_utc": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "asset_intent": step2,
         "asset_type": asset_type,
         "platform": platform,
@@ -195,7 +195,7 @@ if "history" not in st.session_state:
 anchor = st.session_state.anchor
 
 # ============================================================
-# SIDEBAR — LIVE TELEMETRY (the TK_GAUGE flavor, free)
+# SIDEBAR — LIVE TELEMETRY
 # ============================================================
 with st.sidebar:
     st.title("⬡ XX_LABS")
@@ -225,7 +225,8 @@ with st.sidebar:
     up = st.file_uploader("Load brand_anchor.json", type=["json"])
     if up is not None:
         try:
-            st.session_state.anchor = json.load(up)
+            content = up.read().decode("utf-8")
+            st.session_state.anchor = json.loads(content)
             st.success("Anchor loaded. Hash recomputed.")
             st.rerun()
         except Exception as e:
