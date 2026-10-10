@@ -59,8 +59,44 @@ DEFAULT_ANCHOR = {
     "default_aspect": "16:9"
 }
 
+def normalize_anchor(a: dict) -> dict:
+    """Safely maps any incoming JSON structure to expected schema keys."""
+    if not isinstance(a, dict):
+        return DEFAULT_ANCHOR.copy()
+    
+    normalized = DEFAULT_ANCHOR.copy()
+    normalized["anchor_id"] = a.get("anchor_id") or a.get("id") or "BTA-CUSTOM.01"
+    normalized["anchor_name"] = a.get("anchor_name") or a.get("name") or a.get("title") or "Custom Anchor"
+    normalized["governance_version"] = a.get("governance_version") or a.get("version") or "CIAT25.1"
+    normalized["tone"] = a.get("tone") or a.get("brand_tone") or DEFAULT_ANCHOR["tone"]
+    
+    vecs = a.get("vectors") or a.get("style_vectors")
+    if isinstance(vecs, dict) and vecs:
+        normalized["vectors"] = vecs
+        
+    cc = a.get("color_channels") or a.get("colors")
+    if isinstance(cc, dict):
+        normalized["color_channels"] = cc
+    elif isinstance(cc, list):
+        normalized["color_channels"] = {"active": cc, "forbidden": []}
+        
+    kr = a.get("kelvin_range") or a.get("kelvin")
+    if isinstance(kr, dict):
+        normalized["kelvin_range"] = kr
+        
+    for key in ["materials", "geometry_overlays", "filler_phrases", "forbidden_elements", "competitor_names"]:
+        if key in a and isinstance(a[key], list):
+            normalized[key] = a[key]
+            
+    if "default_aspect" in a:
+        normalized["default_aspect"] = a["default_aspect"]
+    elif "aspect_ratio" in a:
+        normalized["default_aspect"] = a["aspect_ratio"]
+        
+    return normalized
+
 # ============================================================
-# DETERMINISTIC CORE — the three pipeline steps + lexical gate
+# DETERMINISTIC CORE
 # ============================================================
 def canonical(obj) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
@@ -72,7 +108,6 @@ def _phrase_escape(p: str) -> str:
     return re.escape(p.strip())
 
 def purge_filler(text: str, anchor: dict):
-    """Step 1 — Input Isolation: strip conversational filler / vague modifiers."""
     removed, cleaned = [], text
     for phrase in sorted(anchor.get("filler_phrases", []), key=len, reverse=True):
         pattern = re.compile(r"\b" + _phrase_escape(phrase) + r"\b", re.IGNORECASE)
@@ -82,7 +117,6 @@ def purge_filler(text: str, anchor: dict):
     return re.sub(r"\s+", " ", cleaned).strip(" ,;."), removed
 
 def purge_banned(text: str, anchor: dict):
-    """Step 2 — Negative Constraint Purging: scrub banned colors + competitor names."""
     banned = list(anchor.get("color_channels", {}).get("forbidden", [])) + \
              list(anchor.get("competitor_names", []))
     removed, cleaned = [], text
@@ -95,15 +129,15 @@ def purge_banned(text: str, anchor: dict):
 
 def lock_parameters(intent: str, anchor: dict, vector_key: str, asset_type: str,
                     platform: str, aspect: str, kelvin: int):
-    """Step 3 — Parameter Locking: assemble immutable prompt per platform dialect."""
-    vec = anchor["vectors"][vector_key]
-    colors = ", ".join(c["name"] for c in anchor["color_channels"]["active"])
-    hexes = ", ".join(c["hex"] for c in anchor["color_channels"]["active"])
+    vectors = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
+    vec = vectors.get(vector_key, list(vectors.values())[0])
+    colors = ", ".join(c["name"] for c in anchor.get("color_channels", {}).get("active", []))
+    hexes = ", ".join(c["hex"] for c in anchor.get("color_channels", {}).get("active", []))
     mats = ", ".join(anchor.get("materials", []))
     geo = ", ".join(anchor.get("geometry_overlays", []))
-    k = anchor.get("kelvin_range", {})
+    k = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
     kelvin = min(max(kelvin, k.get("min", 3200)), k.get("max", 5600))
-    base = (f"{intent} — {vec['description']} Color channels: {colors} ({hexes}). "
+    base = (f"{intent} — {vec.get('description', '')} Color channels: {colors} ({hexes}). "
             f"Lighting locked at {kelvin}K. Materials: {mats}. Overlays: {geo}.")
     negatives = ", ".join(anchor.get("color_channels", {}).get("forbidden", [])[:3] +
                           ["style drift", "brand dilution", "generic filler"])
@@ -116,9 +150,9 @@ def lock_parameters(intent: str, anchor: dict, vector_key: str, asset_type: str,
     else:
         prompt = base
     if asset_type == "copy":
-        prompt = (f"[COPY BRIEF | tone: {anchor['tone']}] Subject: {intent}. Voice: locked to anchor. "
+        prompt = (f"[COPY BRIEF | tone: {anchor.get('tone', '')}] Subject: {intent}. Voice: locked to anchor. "
                   f"Forbidden: {', '.join(anchor.get('forbidden_elements', []))}.")
-    return prompt, negatives, {"kelvin_locked": kelvin, "aspect": aspect, "vector": vec["title"]}
+    return prompt, negatives, {"kelvin_locked": kelvin, "aspect": aspect, "vector": vec.get("title", vector_key)}
 
 def validate(intent: str, prompt: str, anchor: dict, removed_banned, asset_type: str = "still"):
     checks = []
@@ -134,7 +168,7 @@ def validate(intent: str, prompt: str, anchor: dict, removed_banned, asset_type:
         tone_ok = anchor.get("tone", "").split(",")[0].strip().lower() in body
         checks.append(("Tone lock embedded", tone_ok, "anchor tone in brief header"))
     else:
-        active = [c["name"] for c in anchor["color_channels"]["active"] if c["name"].lower() in body]
+        active = [c["name"] for c in anchor.get("color_channels", {}).get("active", []) if c["name"].lower() in body]
         checks.append(("Approved color channel locked", len(active) >= 1, f"locked: {active}"))
         kr = anchor.get("kelvin_range", {})
         m = re.search(r"(\d{4})K", prompt)
@@ -151,19 +185,21 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
     step2, banned_hits = purge_banned(step1, anchor)
     prompt, negatives, locks = lock_parameters(step2, anchor, vector_key, asset_type, platform, aspect, kelvin)
     checks, status = validate(step2, prompt, anchor, banned_hits, asset_type)
+    vectors = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
+    vec_title = vectors.get(vector_key, {}).get("title", vector_key)
     payload = {
         "xxlabs_bta_version": anchor.get("governance_version", "CIAT25.1"),
-        "anchor_id": anchor["anchor_id"],
+        "anchor_id": anchor.get("anchor_id", "BTA-XXL.01"),
         "anchor_hash": anchor_hash(anchor),
         "timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "asset_intent": step2,
         "asset_type": asset_type,
         "platform": platform,
         "brand_parameters": {
-            "tone": anchor["tone"],
-            "visual_vector": anchor["vectors"][vector_key]["title"],
-            "kelvin_lighting": f"{locks['kelvin_locked']}K (locked {anchor['kelvin_range']['min']}–{anchor['kelvin_range']['max']})",
-            "color_channels": [c["name"] for c in anchor["color_channels"]["active"]],
+            "tone": anchor.get("tone", ""),
+            "visual_vector": vec_title,
+            "kelvin_lighting": f"{locks['kelvin_locked']}K (locked {anchor.get('kelvin_range', {}).get('min', 3200)}–{anchor.get('kelvin_range', {}).get('max', 5600)})",
+            "color_channels": [c["name"] for c in anchor.get("color_channels", {}).get("active", [])],
             "forbidden_elements": anchor.get("forbidden_elements", [])
         },
         "execution_payload": {
@@ -180,18 +216,22 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
     return payload, status
 
 # ============================================================
-# SESSION STATE & SYNCHRONIZATION FUNCTION
+# SESSION STATE & SYNCHRONIZATION
 # ============================================================
 if "anchor" not in st.session_state:
-    st.session_state.anchor = json.loads(canonical(DEFAULT_ANCHOR))
+    st.session_state.anchor = normalize_anchor(DEFAULT_ANCHOR)
 
 def sync_anchor_to_state(a):
+    a = normalize_anchor(a)
     st.session_state.a_name = a.get("anchor_name", "")
     st.session_state.a_tone = a.get("tone", "")
-    st.session_state.v1t = a.get("vectors", {}).get("alpha", {}).get("title", "")
-    st.session_state.v1d = a.get("vectors", {}).get("alpha", {}).get("description", "")
-    st.session_state.v2t = a.get("vectors", {}).get("beta", {}).get("title", "")
-    st.session_state.v2d = a.get("vectors", {}).get("beta", {}).get("description", "")
+    vecs = a.get("vectors", DEFAULT_ANCHOR["vectors"])
+    alpha_vec = vecs.get("alpha", {})
+    beta_vec = vecs.get("beta", {})
+    st.session_state.v1t = alpha_vec.get("title", "")
+    st.session_state.v1d = alpha_vec.get("description", "")
+    st.session_state.v2t = beta_vec.get("title", "")
+    st.session_state.v2d = beta_vec.get("description", "")
     st.session_state.active_lines = "\n".join(f"{c['name']},{c['hex']}" for c in a.get("color_channels", {}).get("active", []))
     st.session_state.forbidden_cols = ", ".join(a.get("color_channels", {}).get("forbidden", []))
     st.session_state.k_min = int(a.get("kelvin_range", {}).get("min", 3200))
@@ -209,7 +249,7 @@ if "stats" not in st.session_state:
 if "history" not in st.session_state:
     st.session_state.history = []
 
-anchor = st.session_state.anchor
+anchor = normalize_anchor(st.session_state.anchor)
 current_hash = anchor_hash(anchor)
 
 # ============================================================
@@ -228,12 +268,12 @@ with st.sidebar:
     for c in anchor.get("color_channels", {}).get("active", []):
         st.markdown(
             f'<span style="display:inline-block;width:14px;height:14px;'
-            f'background:{c["hex"]};border-radius:3px;margin-right:6px;"></span>'
-            f'{c["name"]} (`{c["hex"]}`)',
+            f'background:{c.get("hex", "#000")};border-radius:3px;margin-right:6px;"></span>'
+            f'{c.get("name", "")} (`{c.get("hex", "")}`)',
             unsafe_allow_html=True
         )
     kr = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
-    st.markdown(f"**Kelvin lock:** {kr['min']}K – {kr['max']}K")
+    st.markdown(f"**Kelvin lock:** {kr.get('min', 3200)}K – {kr.get('max', 5600)}K")
     st.markdown(f"**Default AR:** {anchor.get('default_aspect','16:9')}")
     st.divider()
     st.markdown("**Session telemetry**")
@@ -247,10 +287,11 @@ with st.sidebar:
     if up is not None:
         try:
             content = up.read().decode("utf-8")
-            new_anchor = json.loads(content)
-            st.session_state.anchor = new_anchor
-            sync_anchor_to_state(new_anchor)
-            st.success("Anchor loaded & form synced.")
+            raw_json = json.loads(content)
+            normalized_new = normalize_anchor(raw_json)
+            st.session_state.anchor = normalized_new
+            sync_anchor_to_state(normalized_new)
+            st.success("Anchor loaded & synchronized.")
             st.rerun()
         except Exception as e:
             st.error(f"Invalid anchor file: {e}")
@@ -301,8 +342,10 @@ with tab1:
             "anchor_name": st.session_state.a_name,
             "governance_version": anchor.get("governance_version", "CIAT25.1"),
             "tone": st.session_state.a_tone,
-            "vectors": {"alpha": {"title": st.session_state.v1t, "description": st.session_state.v1d},
-                        "beta": {"title": st.session_state.v2t, "description": st.session_state.v2d}},
+            "vectors": {
+                "alpha": {"title": st.session_state.v1t, "description": st.session_state.v1d},
+                "beta": {"title": st.session_state.v2t, "description": st.session_state.v2d}
+            },
             "color_channels": {"active": cols, "forbidden": _csv(st.session_state.forbidden_cols)},
             "kelvin_range": {"min": int(st.session_state.k_min), "max": int(st.session_state.k_max)},
             "materials": _lines(st.session_state.a_mats),
@@ -312,22 +355,24 @@ with tab1:
             "competitor_names": _csv(st.session_state.a_comp),
             "default_aspect": st.session_state.a_ar
         }
-        st.session_state.anchor = new_anchor
-        st.success(f"Anchor forged. Hash: `{anchor_hash(new_anchor)}` — any parameter change changes the hash.")
+        st.session_state.anchor = normalize_anchor(new_anchor)
+        st.success(f"Anchor forged. Hash: `{anchor_hash(st.session_state.anchor)}`")
         st.rerun()
 
 # ---------------- TAB 2: BRIEF GOVERNOR ----------------
 with tab2:
     st.subheader("Drift Interception — paste a messy brief")
+    vectors = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
+    vector_keys = list(vectors.keys())
     g1, g2, g3, g4 = st.columns(4)
-    vector_sel = g1.selectbox("Style vector", ["alpha", "beta"],
-                              format_func=lambda k: anchor.get("vectors", {}).get(k, {}).get("title", k))
+    vector_sel = g1.selectbox("Style vector", vector_keys,
+                              format_func=lambda k: vectors.get(k, {}).get("title", k))
     asset_sel = g2.selectbox("Asset type", ["still", "motion", "copy"])
     platform_sel = g3.selectbox("Target engine", ["Midjourney", "Runway", "Kling", "Universal"])
     ar_sel = g4.text_input("Aspect ratio", anchor.get("default_aspect", "16:9"))
     kr = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
     kelvin_sel = st.slider("Lighting temperature (locked range)", 2000, 6500,
-                           int((kr["min"] + kr["max"]) / 2))
+                           int((kr.get("min", 3200) + kr.get("max", 5600)) / 2))
     raw = st.text_area("Raw brief", placeholder="e.g. make an awesome epic 8k render of a futuristic processor, laser blue glow, very cool, cyberpunk vibe…",
                        height=140)
     if st.button("Run Governance ⬡", type="primary") and raw.strip():
@@ -371,5 +416,4 @@ with tab2:
                            f"**{h['execution_payload']['validation_status']}** | intent: {h['asset_intent'][:60]}…")
 
 st.divider()
-st.caption("XX_LABS BTA Workbench — verification on the prompt, not the pixels. "
-           "Vision-based asset audit (PASS/FAIL on renders) is a paid-tier roadmap item.")
+st.caption("XX_LABS BTA Workbench — verification on the prompt, not the pixels.")
