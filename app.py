@@ -74,7 +74,8 @@ def load_and_merge_json(raw: dict) -> dict:
         if isinstance(vis_vectors, list) and len(vis_vectors) > 0:
             vectors_dict = {}
             for i, vec in enumerate(vis_vectors):
-                key = "alpha" if i == 0 else ("beta" if i == 1 else f"vector_{i+1}")
+                # Dynamically map all vectors found in the registry (alpha, beta, gamma, etc.)
+                key = "alpha" if i == 0 else ("beta" if i == 1 else ("gamma" if i == 2 else f"vector_{i+1}"))
                 title = vec.get("name", f"Vector {i+1}")
                 desc = f"{vec.get('visual_parameters', '')} Color discipline: {vec.get('color_discipline', '')}"
                 vectors_dict[key] = {"title": title, "description": desc}
@@ -336,19 +337,12 @@ st.caption("Ambiguity is stripped. Parameters are locked. Verification runs on t
 
 tab1, tab2 = st.tabs(["① Forge / Edit Anchor", "② Govern a Brief"])
 
-# ---------------- TAB 1: ANCHOR BUILDER (DYNAMIC HASH KEYS) ----------------
+# ---------------- TAB 1: ANCHOR BUILDER (DYNAMIC VECTOR RENDERING) ----------------
 with tab1:
     st.subheader("Anchor Interview — forge a Brand Truth Anchor")
     st.caption("The anchor is the product. Everything downstream is enforcement.")
     
     vecs = anchor.get("vectors", {})
-    vector_keys = list(vecs.keys())
-    
-    v_alpha_key = vector_keys[0] if len(vector_keys) > 0 else "alpha"
-    v_beta_key = vector_keys[1] if len(vector_keys) > 1 else "beta"
-    
-    alpha_v = vecs.get(v_alpha_key, {})
-    beta_v = vecs.get(v_beta_key, {})
     
     active_cols_list = anchor.get("color_channels", {}).get("active", [])
     active_cols_str = "\n".join(f"{c['name']},{c['hex']}" for c in active_cols_list if isinstance(c, dict) and "name" in c and "hex" in c)
@@ -358,17 +352,20 @@ with tab1:
     geo_str = "\n".join(anchor.get("geometry_overlays", []))
     comp_str = ", ".join(anchor.get("competitor_names", []))
 
-    # Dynamic keys using current_hash force Streamlit to wipe widget cache and redraw instantly on JSON upload
     c1, c2 = st.columns(2)
     a_name = c1.text_input("Anchor name", value=anchor.get("anchor_name", ""), key=f"name_{current_hash}")
     a_tone = c2.text_input("Locked tone", value=anchor.get("tone", ""), key=f"tone_{current_hash}")
     
-    st.markdown("**Style vectors**")
-    v1t = st.text_input(f"Vector ({v_alpha_key}) title", value=alpha_v.get("title", ""), key=f"v1t_{current_hash}")
-    v1d = st.text_area(f"Vector ({v_alpha_key}) description", value=alpha_v.get("description", ""), height=100, key=f"v1d_{current_hash}")
+    st.markdown("### Style Vectors (Dynamic Registry)")
+    edited_vectors = {}
     
-    v2t = st.text_input(f"Vector ({v_beta_key}) title", value=beta_v.get("title", ""), key=f"v2t_{current_hash}")
-    v2d = st.text_area(f"Vector ({v_beta_key}) description", value=beta_v.get("description", ""), height=80, key=f"v2d_{current_hash}")
+    # Dynamically render inputs for ALL vectors present in the uploaded JSON schema (2, 3, or more)
+    for v_key, v_data in vecs.items():
+        st.markdown(f"**Vector ID: `{v_key}`**")
+        vt = st.text_input(f"Title ({v_key})", value=v_data.get("title", ""), key=f"v_title_{v_key}_{current_hash}")
+        vd = st.text_area(f"Description ({v_key})", value=v_data.get("description", ""), height=90, key=f"v_desc_{v_key}_{current_hash}")
+        edited_vectors[v_key] = {"title": vt, "description": vd}
+        st.divider()
     
     st.markdown("**Color channels** (name,hex — one per line)")
     active_lines = st.text_area("Active (locked) channels", value=active_cols_str, height=90, key=f"active_{current_hash}")
@@ -398,10 +395,7 @@ with tab1:
             "anchor_name": a_name,
             "governance_version": anchor.get("governance_version", "CIAT25.1"),
             "tone": a_tone,
-            "vectors": {
-                v_alpha_key: {"title": v1t, "description": v1d},
-                v_beta_key: {"title": v2t, "description": v2d}
-            },
+            "vectors": edited_vectors,
             "color_channels": {"active": cols, "forbidden": _csv(forbidden_cols)},
             "kelvin_range": {"min": int(k_min), "max": int(k_max)},
             "materials": _lines(a_mats),
