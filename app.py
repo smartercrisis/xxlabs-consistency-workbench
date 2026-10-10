@@ -180,7 +180,7 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
     return payload, status
 
 # ============================================================
-# SESSION STATE & SYNCHRONIZATION
+# SESSION STATE & SYNCHRONIZATION FUNCTION
 # ============================================================
 if "anchor" not in st.session_state:
     st.session_state.anchor = json.loads(canonical(DEFAULT_ANCHOR))
@@ -250,7 +250,7 @@ with st.sidebar:
             new_anchor = json.loads(content)
             st.session_state.anchor = new_anchor
             sync_anchor_to_state(new_anchor)
-            st.success("Anchor loaded. Hash recomputed.")
+            st.success("Anchor loaded & form synced.")
             st.rerun()
         except Exception as e:
             st.error(f"Invalid anchor file: {e}")
