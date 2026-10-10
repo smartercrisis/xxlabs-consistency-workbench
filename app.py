@@ -309,7 +309,7 @@ st.caption("Ambiguity is stripped. Parameters are locked. Verification runs on t
 
 tab1, tab2 = st.tabs(["① Forge / Edit Anchor", "② Govern a Brief"])
 
-# ---------------- TAB 1: ANCHOR BUILDER ----------------
+# ---------------- TAB 1: ANCHOR BUILDER (DYNAMIC HASH KEYS) ----------------
 with tab1:
     st.subheader("Anchor Interview — forge a Brand Truth Anchor")
     st.caption("The anchor is the product. Everything downstream is enforcement.")
@@ -331,34 +331,32 @@ with tab1:
     geo_str = "\n".join(anchor.get("geometry_overlays", []))
     comp_str = ", ".join(anchor.get("competitor_names", []))
 
-    with st.form(f"form_anchor_{current_hash}"):
-        c1, c2 = st.columns(2)
-        a_name = c1.text_input("Anchor name", value=anchor.get("anchor_name", ""))
-        a_tone = c2.text_input("Locked tone", value=anchor.get("tone", ""))
-        
-        st.markdown("**Style vectors**")
-        v1t = st.text_input(f"Vector ({v_alpha_key}) title", value=alpha_v.get("title", ""))
-        v1d = st.text_area(f"Vector ({v_alpha_key}) description", value=alpha_v.get("description", ""), height=100)
-        
-        v2t = st.text_input(f"Vector ({v_beta_key}) title", value=beta_v.get("title", ""))
-        v2d = st.text_area(f"Vector ({v_beta_key}) description", value=beta_v.get("description", ""), height=80)
-        
-        st.markdown("**Color channels** (name,hex — one per line)")
-        active_lines = st.text_area("Active (locked) channels", value=active_cols_str, height=90)
-        forbidden_cols = st.text_area("Forbidden channels (comma-separated)", value=forbidden_cols_str, height=60)
-        
-        kr1, kr2, ar = st.columns(3)
-        k_min = kr1.number_input("Kelvin min", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("min", 3200)))
-        k_max = kr2.number_input("Kelvin max", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("max", 5600)))
-        a_ar = ar.text_input("Default aspect ratio", value=anchor.get("default_aspect", "16:9"))
-        
-        a_mats = st.text_area("Materials (one per line)", value=mats_str, height=70)
-        a_geo = st.text_area("Geometry overlays (one per line)", value=geo_str, height=60)
-        a_comp = st.text_input("Competitor names to purge (comma-separated)", value=comp_str)
-        
-        submitted = st.form_submit_button("Forge Anchor → compute hash")
-
-    if submitted:
+    # Dynamic keys tied to current_hash force Streamlit to wipe widget cache and redraw instantly
+    c1, c2 = st.columns(2)
+    a_name = c1.text_input("Anchor name", value=anchor.get("anchor_name", ""), key=f"name_{current_hash}")
+    a_tone = c2.text_input("Locked tone", value=anchor.get("tone", ""), key=f"tone_{current_hash}")
+    
+    st.markdown("**Style vectors**")
+    v1t = st.text_input(f"Vector ({v_alpha_key}) title", value=alpha_v.get("title", ""), key=f"v1t_{current_hash}")
+    v1d = st.text_area(f"Vector ({v_alpha_key}) description", value=alpha_v.get("description", ""), height=100, key=f"v1d_{current_hash}")
+    
+    v2t = st.text_input(f"Vector ({v_beta_key}) title", value=beta_v.get("title", ""), key=f"v2t_{current_hash}")
+    v2d = st.text_area(f"Vector ({v_beta_key}) description", value=beta_v.get("description", ""), height=80, key=f"v2d_{current_hash}")
+    
+    st.markdown("**Color channels** (name,hex — one per line)")
+    active_lines = st.text_area("Active (locked) channels", value=active_cols_str, height=90, key=f"active_{current_hash}")
+    forbidden_cols = st.text_area("Forbidden channels (comma-separated)", value=forbidden_cols_str, height=60, key=f"forbidden_{current_hash}")
+    
+    kr1, kr2, ar = st.columns(3)
+    k_min = kr1.number_input("Kelvin min", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("min", 3200)), key=f"kmin_{current_hash}")
+    k_max = kr2.number_input("Kelvin max", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("max", 5600)), key=f"kmax_{current_hash}")
+    a_ar = ar.text_input("Default aspect ratio", value=anchor.get("default_aspect", "16:9"), key=f"ar_{current_hash}")
+    
+    a_mats = st.text_area("Materials (one per line)", value=mats_str, height=70, key=f"mats_{current_hash}")
+    a_geo = st.text_area("Geometry overlays (one per line)", value=geo_str, height=60, key=f"geo_{current_hash}")
+    a_comp = st.text_input("Competitor names to purge (comma-separated)", value=comp_str, key=f"comp_{current_hash}")
+    
+    if st.button("Forge Anchor → compute hash", type="primary"):
         def _lines(s): return [x.strip() for x in s.split("\n") if x.strip()]
         def _csv(s): return [x.strip() for x in s.split(",") if x.strip()]
         
