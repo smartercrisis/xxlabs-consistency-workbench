@@ -60,7 +60,6 @@ DEFAULT_ANCHOR = {
 }
 
 def normalize_anchor(a: dict) -> dict:
-    """Safely maps any incoming JSON structure to expected schema keys."""
     if not isinstance(a, dict):
         return DEFAULT_ANCHOR.copy()
     
@@ -216,34 +215,10 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
     return payload, status
 
 # ============================================================
-# SESSION STATE & SYNCHRONIZATION
+# SESSION STATE
 # ============================================================
 if "anchor" not in st.session_state:
     st.session_state.anchor = normalize_anchor(DEFAULT_ANCHOR)
-
-def sync_anchor_to_state(a):
-    a = normalize_anchor(a)
-    st.session_state.a_name = a.get("anchor_name", "")
-    st.session_state.a_tone = a.get("tone", "")
-    vecs = a.get("vectors", DEFAULT_ANCHOR["vectors"])
-    alpha_vec = vecs.get("alpha", {})
-    beta_vec = vecs.get("beta", {})
-    st.session_state.v1t = alpha_vec.get("title", "")
-    st.session_state.v1d = alpha_vec.get("description", "")
-    st.session_state.v2t = beta_vec.get("title", "")
-    st.session_state.v2d = beta_vec.get("description", "")
-    st.session_state.active_lines = "\n".join(f"{c['name']},{c['hex']}" for c in a.get("color_channels", {}).get("active", []))
-    st.session_state.forbidden_cols = ", ".join(a.get("color_channels", {}).get("forbidden", []))
-    st.session_state.k_min = int(a.get("kelvin_range", {}).get("min", 3200))
-    st.session_state.k_max = int(a.get("kelvin_range", {}).get("max", 5600))
-    st.session_state.a_ar = a.get("default_aspect", "16:9")
-    st.session_state.a_mats = "\n".join(a.get("materials", []))
-    st.session_state.a_geo = "\n".join(a.get("geometry_overlays", []))
-    st.session_state.a_comp = ", ".join(a.get("competitor_names", []))
-
-if "a_name" not in st.session_state:
-    sync_anchor_to_state(st.session_state.anchor)
-
 if "stats" not in st.session_state:
     st.session_state.stats = {"briefs": 0, "filler_purged": 0, "banned_purged": 0, "fails": 0}
 if "history" not in st.session_state:
@@ -288,9 +263,7 @@ with st.sidebar:
         try:
             content = up.read().decode("utf-8")
             raw_json = json.loads(content)
-            normalized_new = normalize_anchor(raw_json)
-            st.session_state.anchor = normalized_new
-            sync_anchor_to_state(normalized_new)
+            st.session_state.anchor = normalize_anchor(raw_json)
             st.success("Anchor loaded & synchronized.")
             st.rerun()
         except Exception as e:
@@ -308,52 +281,62 @@ tab1, tab2 = st.tabs(["① Forge / Edit Anchor", "② Govern a Brief"])
 with tab1:
     st.subheader("Anchor Interview — forge a Brand Truth Anchor")
     st.caption("The anchor is the product. Everything downstream is enforcement.")
-    with st.form("anchor_form"):
+    
+    vecs = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
+    alpha_v = vecs.get("alpha", {})
+    beta_v = vecs.get("beta", {})
+    active_cols_str = "\n".join(f"{c['name']},{c['hex']}" for c in anchor.get("color_channels", {}).get("active", []))
+    forbidden_cols_str = ", ".join(anchor.get("color_channels", {}).get("forbidden", []))
+    mats_str = "\n".join(anchor.get("materials", []))
+    geo_str = "\n".join(anchor.get("geometry_overlays", []))
+    comp_str = ", ".join(anchor.get("competitor_names", []))
+
+    with st.form(f"anchor_form_{current_hash}"):
         c1, c2 = st.columns(2)
-        a_name = c1.text_input("Anchor name", key="a_name")
-        a_tone = c2.text_input("Locked tone", key="a_tone")
+        a_name = c1.text_input("Anchor name", anchor.get("anchor_name", ""))
+        a_tone = c2.text_input("Locked tone", anchor.get("tone", ""))
         st.markdown("**Style vectors**")
-        v1t = st.text_input("Vector Alpha title", key="v1t")
-        v1d = st.text_area("Vector Alpha description", key="v1d", height=100)
-        v2t = st.text_input("Vector Beta title", key="v2t")
-        v2d = st.text_area("Vector Beta description", key="v2d", height=80)
+        v1t = st.text_input("Vector Alpha title", alpha_v.get("title", ""))
+        v1d = st.text_area("Vector Alpha description", alpha_v.get("description", ""), height=100)
+        v2t = st.text_input("Vector Beta title", beta_v.get("title", ""))
+        v2d = st.text_area("Vector Beta description", beta_v.get("description", ""), height=80)
         st.markdown("**Color channels** (name,hex — one per line)")
-        active_lines = st.text_area("Active (locked) channels", key="active_lines", height=90)
-        forbidden_cols = st.text_area("Forbidden channels (comma-separated)", key="forbidden_cols", height=60)
+        active_lines = st.text_area("Active (locked) channels", active_cols_str, height=90)
+        forbidden_cols = st.text_area("Forbidden channels (comma-separated)", forbidden_cols_str, height=60)
         kr1, kr2, ar = st.columns(3)
-        k_min = kr1.number_input("Kelvin min", 1000, 10000, key="k_min")
-        k_max = kr2.number_input("Kelvin max", 1000, 10000, key="k_max")
-        a_ar = ar.text_input("Default aspect ratio", key="a_ar")
-        a_mats = st.text_area("Materials (one per line)", key="a_mats", height=70)
-        a_geo = st.text_area("Geometry overlays (one per line)", key="a_geo", height=60)
-        a_comp = st.text_input("Competitor names to purge (comma-separated)", key="a_comp")
+        k_min = kr1.number_input("Kelvin min", 1000, 10000, int(anchor.get("kelvin_range", {}).get("min", 3200)))
+        k_max = kr2.number_input("Kelvin max", 1000, 10000, int(anchor.get("kelvin_range", {}).get("max", 5600)))
+        a_ar = ar.text_input("Default aspect ratio", anchor.get("default_aspect", "16:9"))
+        a_mats = st.text_area("Materials (one per line)", mats_str, height=70)
+        a_geo = st.text_area("Geometry overlays (one per line)", geo_str, height=60)
+        a_comp = st.text_input("Competitor names to purge (comma-separated)", comp_str)
         submitted = st.form_submit_button("Forge Anchor → compute hash")
 
     if submitted:
         def _lines(s): return [x.strip() for x in s.split("\n") if x.strip()]
         def _csv(s): return [x.strip() for x in s.split(",") if x.strip()]
         cols = []
-        for ln in _lines(st.session_state.active_lines):
+        for ln in _lines(active_lines):
             parts = [p.strip() for p in ln.split(",")]
             if len(parts) == 2:
                 cols.append({"name": parts[0], "hex": parts[1]})
         new_anchor = {
             "anchor_id": anchor.get("anchor_id", "BTA-XXL.01"),
-            "anchor_name": st.session_state.a_name,
+            "anchor_name": a_name,
             "governance_version": anchor.get("governance_version", "CIAT25.1"),
-            "tone": st.session_state.a_tone,
+            "tone": a_tone,
             "vectors": {
-                "alpha": {"title": st.session_state.v1t, "description": st.session_state.v1d},
-                "beta": {"title": st.session_state.v2t, "description": st.session_state.v2d}
+                "alpha": {"title": v1t, "description": v1d},
+                "beta": {"title": v2t, "description": v2d}
             },
-            "color_channels": {"active": cols, "forbidden": _csv(st.session_state.forbidden_cols)},
-            "kelvin_range": {"min": int(st.session_state.k_min), "max": int(st.session_state.k_max)},
-            "materials": _lines(st.session_state.a_mats),
-            "geometry_overlays": _lines(st.session_state.a_geo),
+            "color_channels": {"active": cols, "forbidden": _csv(forbidden_cols)},
+            "kelvin_range": {"min": int(k_min), "max": int(k_max)},
+            "materials": _lines(a_mats),
+            "geometry_overlays": _lines(a_geo),
             "filler_phrases": anchor.get("filler_phrases", DEFAULT_ANCHOR["filler_phrases"]),
             "forbidden_elements": anchor.get("forbidden_elements", []),
-            "competitor_names": _csv(st.session_state.a_comp),
-            "default_aspect": st.session_state.a_ar
+            "competitor_names": _csv(a_comp),
+            "default_aspect": a_ar
         }
         st.session_state.anchor = normalize_anchor(new_anchor)
         st.success(f"Anchor forged. Hash: `{anchor_hash(st.session_state.anchor)}`")
