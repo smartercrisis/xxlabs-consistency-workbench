@@ -269,33 +269,10 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
     return payload, status
 
 # ============================================================
-# SESSION STATE MANAGEMENT & SYNCHRONIZATION
+# SESSION STATE MANAGEMENT
 # ============================================================
 if "anchor" not in st.session_state:
     st.session_state.anchor = DEFAULT_ANCHOR.copy()
-
-def update_session_fields(a):
-    st.session_state.a_name = a.get("anchor_name", "")
-    st.session_state.a_tone = a.get("tone", "")
-    vecs = a.get("vectors", DEFAULT_ANCHOR["vectors"])
-    v_keys = list(vecs.keys())
-    v_alpha = vecs.get(v_keys[0], {}) if len(v_keys) > 0 else {}
-    v_beta = vecs.get(v_keys[1], {}) if len(v_keys) > 1 else {}
-    st.session_state.v1t = v_alpha.get("title", "")
-    st.session_state.v1d = v_alpha.get("description", "")
-    st.session_state.v2t = v_beta.get("title", "")
-    st.session_state.v2d = v_beta.get("description", "")
-    st.session_state.active_lines = "\n".join(f"{c['name']},{c['hex']}" for c in a.get("color_channels", {}).get("active", []) if isinstance(c, dict))
-    st.session_state.forbidden_cols = ", ".join(a.get("color_channels", {}).get("forbidden", []))
-    st.session_state.k_min = int(a.get("kelvin_range", {}).get("min", 3200))
-    st.session_state.k_max = int(a.get("kelvin_range", {}).get("max", 5600))
-    st.session_state.a_ar = a.get("default_aspect", "16:9")
-    st.session_state.a_mats = "\n".join(a.get("materials", []))
-    st.session_state.a_geo = "\n".join(a.get("geometry_overlays", []))
-    st.session_state.a_comp = ", ".join(a.get("competitor_names", []))
-
-if "a_name" not in st.session_state:
-    update_session_fields(st.session_state.anchor)
 
 if "stats" not in st.session_state:
     st.session_state.stats = {"briefs": 0, "filler_purged": 0, "banned_purged": 0, "fails": 0}
@@ -347,9 +324,7 @@ with st.sidebar:
         try:
             content = up.read().decode("utf-8")
             raw_json = json.loads(content)
-            new_anchor = load_and_merge_json(raw_json)
-            st.session_state.anchor = new_anchor
-            update_session_fields(new_anchor)
+            st.session_state.anchor = load_and_merge_json(raw_json)
             st.success("Anchor file loaded and synced.")
             st.rerun()
         except Exception as e:
@@ -363,7 +338,7 @@ st.caption("Ambiguity is stripped. Parameters are locked. Verification runs on t
 
 tab1, tab2 = st.tabs(["① Forge / Edit Anchor", "② Govern a Brief"])
 
-# ---------------- TAB 1: ANCHOR BUILDER (DYNAMIC HASH KEYS) ----------------
+# ---------------- TAB 1: ANCHOR BUILDER (DYNAMIC VALUES, NO CACHED KEYS) ----------------
 with tab1:
     st.subheader("Anchor Interview — forge a Brand Truth Anchor")
     st.caption("The anchor is the product. Everything downstream is enforcement.")
@@ -385,36 +360,38 @@ with tab1:
     geo_str = "\n".join(anchor.get("geometry_overlays", []))
     comp_str = ", ".join(anchor.get("competitor_names", []))
 
+    # Without keys, these widgets bind directly to anchor data on every rerun
     c1, c2 = st.columns(2)
-    a_name = c1.text_input("Anchor name", value=anchor.get("anchor_name", ""), key=f"name_{current_hash}")
-    a_tone = c2.text_input("Locked tone", value=anchor.get("tone", ""), key=f"tone_{current_hash}")
+    a_name = c1.text_input("Anchor name", value=anchor.get("anchor_name", ""))
+    a_tone = c2.text_input("Locked tone", value=anchor.get("tone", ""))
     
     st.markdown("**Style vectors**")
-    v1t = st.text_input(f"Vector ({v_alpha_key}) title", value=alpha_v.get("title", ""), key=f"v1t_{current_hash}")
-    v1d = st.text_area(f"Vector ({v_alpha_key}) description", value=alpha_v.get("description", ""), height=100, key=f"v1d_{current_hash}")
+    v1t = st.text_input(f"Vector ({v_alpha_key}) title", value=alpha_v.get("title", ""))
+    v1d = st.text_area(f"Vector ({v_alpha_key}) description", value=alpha_v.get("description", ""), height=100)
     
-    v2t = st.text_input(f"Vector ({v_beta_key}) title", value=beta_v.get("title", ""), key=f"v2t_{current_hash}")
-    v2d = st.text_area(f"Vector ({v_beta_key}) description", value=beta_v.get("description", ""), height=80, key=f"v2d_{current_hash}")
+    v2t = st.text_input(f"Vector ({v_beta_key}) title", value=beta_v.get("title", ""))
+    v2d = st.text_area(f"Vector ({v_beta_key}) description", value=beta_v.get("description", ""), height=80)
     
     st.markdown("**Color channels** (name,hex — one per line)")
-    active_lines = st.text_area("Active (locked) channels", value=active_cols_str, height=90, key=f"active_{current_hash}")
-    forbidden_cols = st.text_area("Forbidden channels (comma-separated)", value=forbidden_cols_str, height=60, key=f"forbidden_{current_hash}")
+    active_lines = st.text_area("Active (locked) channels", value=active_cols_str, height=90)
+    forbidden_cols = st.text_area("Forbidden channels (comma-separated)", value=forbidden_cols_str, height=60)
     
+    kr = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
     kr1, kr2, ar = st.columns(3)
-    k_min = kr1.number_input("Kelvin min", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("min", 3200)), key=f"kmin_{current_hash}")
-    k_max = kr2.number_input("Kelvin max", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("max", 5600)), key=f"kmax_{current_hash}")
-    a_ar = ar.text_input("Default aspect ratio", value=anchor.get("default_aspect", "16:9"), key=f"ar_{current_hash}")
+    k_min = kr1.number_input("Kelvin min", 1000, 10000, value=int(kr.get("min", 3200)))
+    k_max = kr2.number_input("Kelvin max", 1000, 10000, value=int(kr.get("max", 5600)))
+    a_ar = ar.text_input("Default aspect ratio", value=anchor.get("default_aspect", "16:9"))
     
-    a_mats = st.text_area("Materials (one per line)", value=mats_str, height=70, key=f"mats_{current_hash}")
-    a_geo = st.text_area("Geometry overlays (one per line)", value=geo_str, height=60, key=f"geo_{current_hash}")
-    a_comp = st.text_input("Competitor names to purge (comma-separated)", value=comp_str, key=f"comp_{current_hash}")
+    a_mats = st.text_area("Materials (one per line)", value=mats_str, height=70)
+    a_geo = st.text_area("Geometry overlays (one per line)", value=geo_str, height=60)
+    a_comp = st.text_input("Competitor names to purge (comma-separated)", value=comp_str)
     
     if st.button("Forge Anchor → compute hash", type="primary"):
         def _lines(s): return [x.strip() for x in s.split("\n") if x.strip()]
         def _csv(s): return [x.strip() for x in s.split(",") if x.strip()]
         
         cols = []
-        for ln in _lines(st.session_state.active_lines):
+        for ln in _lines(active_lines):
             parts = [p.strip() for p in ln.split(",")]
             if len(parts) == 2:
                 cols.append({"name": parts[0], "hex": parts[1]})
@@ -439,7 +416,6 @@ with tab1:
         }
         
         st.session_state.anchor = new_anchor
-        update_session_fields(new_anchor)
         st.success(f"Anchor forged. Hash: `{anchor_hash(new_anchor)}`")
         st.rerun()
 
