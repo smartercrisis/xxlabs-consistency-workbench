@@ -63,6 +63,35 @@ def load_and_merge_json(raw: dict) -> dict:
     if not isinstance(raw, dict):
         return DEFAULT_ANCHOR.copy()
     
+    # Handle bta_master_registry schema
+    reg = raw.get("bta_master_registry")
+    if reg and isinstance(reg, dict):
+        merged = DEFAULT_ANCHOR.copy()
+        merged["anchor_id"] = "BTA-REGISTRY.01"
+        merged["anchor_name"] = "BTA Master Registry"
+        merged["governance_version"] = "CIAT25.1"
+        
+        vis_vectors = reg.get("visual_content_governance_and_style_vectors", [])
+        if isinstance(vis_vectors, list) and len(vis_vectors) > 0:
+            vectors_dict = {}
+            for i, vec in enumerate(vis_vectors):
+                key = "alpha" if i == 0 else ("beta" if i == 1 else f"vector_{i+1}")
+                title = vec.get("name", f"Vector {i+1}")
+                desc = f"{vec.get('visual_parameters', '')} Color discipline: {vec.get('color_discipline', '')}"
+                vectors_dict[key] = {"title": title, "description": desc}
+            merged["vectors"] = vectors_dict
+            
+        merged["color_channels"] = {
+            "active": [
+                {"name": "crimson red", "hex": "#DC143C"},
+                {"name": "nature green", "hex": "#00FF7F"},
+                {"name": "royal gold", "hex": "#D4AF37"}
+            ],
+            "forbidden": ["laser blue", "generic blue glow", "electric blue", "cyan glow"]
+        }
+        return merged
+
+    # Fallback to standard schema
     merged = DEFAULT_ANCHOR.copy()
     merged["anchor_id"] = raw.get("anchor_id") or raw.get("id") or merged["anchor_id"]
     merged["anchor_name"] = raw.get("anchor_name") or raw.get("name") or raw.get("title") or merged["anchor_name"]
@@ -240,10 +269,33 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
     return payload, status
 
 # ============================================================
-# SESSION STATE MANAGEMENT
+# SESSION STATE MANAGEMENT & SYNCHRONIZATION
 # ============================================================
 if "anchor" not in st.session_state:
     st.session_state.anchor = DEFAULT_ANCHOR.copy()
+
+def update_session_fields(a):
+    st.session_state.a_name = a.get("anchor_name", "")
+    st.session_state.a_tone = a.get("tone", "")
+    vecs = a.get("vectors", DEFAULT_ANCHOR["vectors"])
+    v_keys = list(vecs.keys())
+    v_alpha = vecs.get(v_keys[0], {}) if len(v_keys) > 0 else {}
+    v_beta = vecs.get(v_keys[1], {}) if len(v_keys) > 1 else {}
+    st.session_state.v1t = v_alpha.get("title", "")
+    st.session_state.v1d = v_alpha.get("description", "")
+    st.session_state.v2t = v_beta.get("title", "")
+    st.session_state.v2d = v_beta.get("description", "")
+    st.session_state.active_lines = "\n".join(f"{c['name']},{c['hex']}" for c in a.get("color_channels", {}).get("active", []) if isinstance(c, dict))
+    st.session_state.forbidden_cols = ", ".join(a.get("color_channels", {}).get("forbidden", []))
+    st.session_state.k_min = int(a.get("kelvin_range", {}).get("min", 3200))
+    st.session_state.k_max = int(a.get("kelvin_range", {}).get("max", 5600))
+    st.session_state.a_ar = a.get("default_aspect", "16:9")
+    st.session_state.a_mats = "\n".join(a.get("materials", []))
+    st.session_state.a_geo = "\n".join(a.get("geometry_overlays", []))
+    st.session_state.a_comp = ", ".join(a.get("competitor_names", []))
+
+if "a_name" not in st.session_state:
+    update_session_fields(st.session_state.anchor)
 
 if "stats" not in st.session_state:
     st.session_state.stats = {"briefs": 0, "filler_purged": 0, "banned_purged": 0, "fails": 0}
@@ -295,8 +347,10 @@ with st.sidebar:
         try:
             content = up.read().decode("utf-8")
             raw_json = json.loads(content)
-            st.session_state.anchor = load_and_merge_json(raw_json)
-            st.success("Anchor file loaded and merged.")
+            new_anchor = load_and_merge_json(raw_json)
+            st.session_state.anchor = new_anchor
+            update_session_fields(new_anchor)
+            st.success("Anchor file loaded and synced.")
             st.rerun()
         except Exception as e:
             st.error(f"Invalid JSON file: {e}")
@@ -331,7 +385,6 @@ with tab1:
     geo_str = "\n".join(anchor.get("geometry_overlays", []))
     comp_str = ", ".join(anchor.get("competitor_names", []))
 
-    # Dynamic keys tied to current_hash force Streamlit to wipe widget cache and redraw instantly
     c1, c2 = st.columns(2)
     a_name = c1.text_input("Anchor name", value=anchor.get("anchor_name", ""), key=f"name_{current_hash}")
     a_tone = c2.text_input("Locked tone", value=anchor.get("tone", ""), key=f"tone_{current_hash}")
@@ -361,7 +414,7 @@ with tab1:
         def _csv(s): return [x.strip() for x in s.split(",") if x.strip()]
         
         cols = []
-        for ln in _lines(active_lines):
+        for ln in _lines(st.session_state.active_lines):
             parts = [p.strip() for p in ln.split(",")]
             if len(parts) == 2:
                 cols.append({"name": parts[0], "hex": parts[1]})
@@ -386,6 +439,7 @@ with tab1:
         }
         
         st.session_state.anchor = new_anchor
+        update_session_fields(new_anchor)
         st.success(f"Anchor forged. Hash: `{anchor_hash(new_anchor)}`")
         st.rerun()
 
