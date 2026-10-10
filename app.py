@@ -190,6 +190,7 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 anchor = st.session_state.anchor
+current_hash = anchor_hash(anchor)
 
 # ============================================================
 # SIDEBAR — LIVE TELEMETRY
@@ -200,7 +201,7 @@ with st.sidebar:
     st.divider()
     st.markdown(f"**Anchor:** {anchor.get('anchor_name', 'N/A')}")
     st.markdown(f"**ID:** `{anchor.get('anchor_id', 'N/A')}`")
-    st.markdown(f"**Hash:** `{anchor_hash(anchor)}`")
+    st.markdown(f"**Hash:** `{current_hash}`")
     st.markdown(f"**Version:** {anchor.get('governance_version','—')}")
     st.divider()
     st.markdown("**Locked color channels**")
@@ -246,26 +247,26 @@ with tab1:
     st.caption("The anchor is the product. Everything downstream is enforcement.")
     with st.form("anchor_form"):
         c1, c2 = st.columns(2)
-        a_name = c1.text_input("Anchor name", anchor.get("anchor_name", ""))
-        a_tone = c2.text_input("Locked tone", anchor.get("tone", ""))
+        a_name = c1.text_input("Anchor name", anchor.get("anchor_name", ""), key=f"name_{current_hash}")
+        a_tone = c2.text_input("Locked tone", anchor.get("tone", ""), key=f"tone_{current_hash}")
         st.markdown("**Style vectors**")
-        v1t = st.text_input("Vector Alpha title", anchor.get("vectors", {}).get("alpha", {}).get("title", ""))
-        v1d = st.text_area("Vector Alpha description", anchor.get("vectors", {}).get("alpha", {}).get("description", ""), height=100)
-        v2t = st.text_input("Vector Beta title", anchor.get("vectors", {}).get("beta", {}).get("title", ""))
-        v2d = st.text_area("Vector Beta description", anchor.get("vectors", {}).get("beta", {}).get("description", ""), height=80)
+        v1t = st.text_input("Vector Alpha title", anchor.get("vectors", {}).get("alpha", {}).get("title", ""), key=f"v1t_{current_hash}")
+        v1d = st.text_area("Vector Alpha description", anchor.get("vectors", {}).get("alpha", {}).get("description", ""), height=100, key=f"v1d_{current_hash}")
+        v2t = st.text_input("Vector Beta title", anchor.get("vectors", {}).get("beta", {}).get("title", ""), key=f"v2t_{current_hash}")
+        v2d = st.text_area("Vector Beta description", anchor.get("vectors", {}).get("beta", {}).get("description", ""), height=80, key=f"v2d_{current_hash}")
         st.markdown("**Color channels** (name,hex — one per line)")
         active_lines = st.text_area("Active (locked) channels",
-            "\n".join(f"{c['name']},{c['hex']}" for c in anchor.get("color_channels", {}).get("active", [])), height=90)
+            "\n".join(f"{c['name']},{c['hex']}" for c in anchor.get("color_channels", {}).get("active", [])), height=90, key=f"active_{current_hash}")
         forbidden_cols = st.text_area("Forbidden channels (comma-separated)",
-            ", ".join(anchor.get("color_channels", {}).get("forbidden", [])), height=60)
+            ", ".join(anchor.get("color_channels", {}).get("forbidden", [])), height=60, key=f"forbidden_{current_hash}")
         kr1, kr2, ar = st.columns(3)
-        k_min = kr1.number_input("Kelvin min", 1000, 10000, int(anchor.get("kelvin_range", {}).get("min", 3200)))
-        k_max = kr2.number_input("Kelvin max", 1000, 10000, int(anchor.get("kelvin_range", {}).get("max", 5600)))
-        a_ar = ar.text_input("Default aspect ratio", anchor.get("default_aspect", "16:9"))
-        a_mats = st.text_area("Materials (one per line)", "\n".join(anchor.get("materials", [])), height=70)
-        a_geo = st.text_area("Geometry overlays (one per line)", "\n".join(anchor.get("geometry_overlays", [])), height=60)
+        k_min = kr1.number_input("Kelvin min", 1000, 10000, int(anchor.get("kelvin_range", {}).get("min", 3200)), key=f"kmin_{current_hash}")
+        k_max = kr2.number_input("Kelvin max", 1000, 10000, int(anchor.get("kelvin_range", {}).get("max", 5600)), key=f"kmax_{current_hash}")
+        a_ar = ar.text_input("Default aspect ratio", anchor.get("default_aspect", "16:9"), key=f"ar_{current_hash}")
+        a_mats = st.text_area("Materials (one per line)", "\n".join(anchor.get("materials", [])), height=70, key=f"mats_{current_hash}")
+        a_geo = st.text_area("Geometry overlays (one per line)", "\n".join(anchor.get("geometry_overlays", [])), height=60, key=f"geo_{current_hash}")
         a_comp = st.text_input("Competitor names to purge (comma-separated)",
-                               ", ".join(anchor.get("competitor_names", [])))
+                               ", ".join(anchor.get("competitor_names", [])), key=f"comp_{current_hash}")
         submitted = st.form_submit_button("Forge Anchor → compute hash")
 
     if submitted:
@@ -294,8 +295,7 @@ with tab1:
         }
         st.session_state.anchor = new_anchor
         st.success(f"Anchor forged. Hash: `{anchor_hash(new_anchor)}` — any parameter change changes the hash.")
-        st.download_button("Download brand_anchor.json",
-                           canonical(new_anchor), "brand_anchor.json", "application/json")
+        st.rerun()
 
 # ---------------- TAB 2: BRIEF GOVERNOR ----------------
 with tab2:
