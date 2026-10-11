@@ -184,7 +184,36 @@ def purge_banned(text: str, anchor: dict):
         if pattern.search(cleaned):
             removed.append(term)
             cleaned = pattern.sub(" ", cleaned)
+    # Blue-family sweep: exact phrases miss "deep blue", "cyan", "neon cyan", etc.
+    if any(re.search(r"blue|cyan", str(b), re.I) for b in forbidden):
+        fam = re.compile(r"\b(?:(?:deep|neon|electric|laser|bright|light|dark|sky|ice|pale)\s+)?"
+                         r"(?:blue|cyan|azure|teal|indigo|navy|cobalt|turquoise|aqua)\b", re.I)
+        hits = sorted({m.group(0).lower() for m in fam.finditer(cleaned)})
+        if hits:
+            removed.extend(hits)
+            cleaned = fam.sub("approved-channel", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip(" ,;."), removed
+
+STYLE_MARKERS = ["radeon", "photorealistic", "unreal engine", "octane", "ray tracing", "4k", "hdr", "uhd",
+                 "macro photography", "product photography", "depth of field", "sharp focus",
+                 "cinematic lighting", "aesthetic & style", "camera/style tags", "concept art"]
+
+def strip_engine_params(text: str) -> str:
+    return re.sub(r"--(?:ar|v|style|s|q)\s+\S+", " ", text)
+
+def strip_style_conflicts(text: str):
+    """The selected vector owns style. Drop brief sentences that dictate a rival style."""
+    parts = re.split(r"(?<=[.!?])\s+|\s*[·•]\s*", text)
+    kept, dropped = [], []
+    for part in parts:
+        low = part.lower()
+        if any(m in low for m in STYLE_MARKERS):
+            dropped.append(part.strip())
+        elif part.strip():
+            kept.append(part.strip())
+    cleaned = " ".join(kept)
+    cleaned = re.sub(r"^\s*(?:image prompt:)?\s*subject:\s*", "", cleaned, flags=re.I)
+    return cleaned, dropped
 
 def lock_parameters(intent, anchor, vector_key, asset_type, platform, aspect, kelvin):
     vectors = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
@@ -199,7 +228,8 @@ def lock_parameters(intent, anchor, vector_key, asset_type, platform, aspect, ke
     k = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
     kelvin = min(max(kelvin, k.get("min", 3200)), k.get("max", 5600))
 
-    base = (f"{intent} — {vec.get('description', '')} Color channels: {colors} ({hexes}). "
+    base = (f"{vec.get('title', vector_key)} — {vec.get('description', '')} Subject: {intent}. "
+            f"Color channels: {colors} ({hexes}). "
             f"Lighting locked at {kelvin}K. Materials: {mats}. Overlays: {geo}.")
 
     negatives = ", ".join(anchor.get("color_channels", {}).get("forbidden", [])[:3] +
@@ -248,10 +278,16 @@ def validate(intent, prompt, anchor, removed_banned, asset_type="still"):
         checks.append(("Kelvin within lock range", kelvin_ok,
                        f"{m.group(1)}K in {kr.get('min')}–{kr.get('max')}K" if m else "no Kelvin value found"))
 
+    checks.append(("Intent length (warn > 1500 chars)", True,
+                   f"{len(intent)} chars" + (" — WARNING: long brief dilutes the vector" if len(intent) > 1500 else " — ok")))
     checks.append(("Drift interception report", True, "drift detected & purged" if removed_banned else "input clean"))
     return checks, ("PASS" if all(c[1] for c in checks) else "FAIL")
 
-def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin):
+def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin, subject_only=True):
+    raw = strip_engine_params(raw)
+    style_hits = []
+    if subject_only and asset_type != "copy":
+        raw, style_hits = strip_style_conflicts(raw)
     step1, filler_hits = purge_filler(raw, anchor)
     step2, banned_hits = purge_banned(step1, anchor)
     prompt, negatives, locks = lock_parameters(step2, anchor, vector_key, asset_type, platform, aspect, kelvin)
@@ -284,6 +320,7 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
         "governance_telemetry": {
             "filler_purged": filler_hits,
             "banned_purged": banned_hits,
+            "style_purged": [x[:70] for x in style_hits],
             "checks": [{"name": n, "passed": p, "detail": d} for n, p, d in checks]
         }
     }
@@ -463,12 +500,13 @@ with tab2:
     kelvin_sel = st.slider("Lighting temperature (locked range)", 2000, 6500,
                            int((kr.get("min", 3200) + kr.get("max", 5600)) / 2), key=f"kelvin_{current_hash}")
 
+    subject_only = st.checkbox("Subject-only mode (selected vector owns style; rival style sentences are stripped)", value=True)
     raw = st.text_area("Raw brief",
                        placeholder="e.g. make an awesome epic 8k render of a futuristic processor, laser blue glow, very cool, cyberpunk vibe…",
                        height=140)
 
     if st.button("Run Governance ⬡", type="primary") and raw.strip():
-        payload, status = process_brief(raw, anchor, vector_sel, asset_sel, platform_sel, ar_sel, kelvin_sel)
+        payload, status = process_brief(raw, anchor, vector_sel, asset_sel, platform_sel, ar_sel, kelvin_sel, subject_only)
         s = st.session_state.stats
         s["briefs"] += 1
         s["filler_purged"] += len(payload["governance_telemetry"]["filler_purged"])
@@ -489,6 +527,9 @@ with tab2:
             st.write(payload["asset_intent"] or "*(empty — blocked)*")
             if tel["filler_purged"]:
                 st.caption("Filler purged: " + ", ".join(f"`{t}`" for t in tel["filler_purged"]))
+            if tel.get("style_purged"):
+                st.caption(f"Style sentences stripped ({len(tel['style_purged'])}): " + " | ".join(tel["style_purged"][:4]))
+            st.caption(f"Vector applied: `{vector_sel}`")
             if tel["banned_purged"]:
                 st.caption("🚫 Drift purged: " + ", ".join(f"`{t}`" for t in tel["banned_purged"]))
             st.markdown("**Locked execution prompt**")
@@ -501,6 +542,16 @@ with tab2:
                                json.dumps(payload, indent=2, ensure_ascii=False),
                                f"xxlabs_payload_{payload['anchor_hash'].replace(':','')}.json",
                                "application/json")
+
+    if st.button("Compare all vectors on this brief") and raw.strip():
+        cols = st.columns(len(vector_keys))
+        outs = {}
+        for col, vk in zip(cols, vector_keys):
+            pl, stt = process_brief(raw, anchor, vk, asset_sel, platform_sel, ar_sel, kelvin_sel, subject_only)
+            outs[vk] = pl["execution_payload"]["prompt_string"]
+            col.markdown(f"**{vectors[vk].get('title', vk)}** — {stt}")
+            col.code(outs[vk], language="text")
+        st.caption("Prompts identical: " + ("YES" if len(set(outs.values())) == 1 else "no"))
 
     if st.session_state.history:
         with st.expander(f"Session history ({len(st.session_state.history)} governed)"):
