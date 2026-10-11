@@ -1,12 +1,7 @@
-"""
-XX_LABS BTA Workbench — Deterministic Brand Governance (CIAT25.1-flavored)
-No LLM calls. No API keys. Verification runs on the PROMPT, not the pixels.
-Deploy free: github repo + share.streamlit.io
-"""
+import datetime
+import hashlib
 import json
 import re
-import hashlib
-import datetime
 import streamlit as st
 
 st.set_page_config(page_title="XX_LABS BTA Workbench", page_icon="⬡", layout="wide")
@@ -59,72 +54,29 @@ DEFAULT_ANCHOR = {
     "default_aspect": "16:9"
 }
 
-def load_and_merge_json(raw: dict) -> dict:
-    if not isinstance(raw, dict):
-        return DEFAULT_ANCHOR.copy()
-    
-    reg = raw.get("bta_master_registry")
-    if reg and isinstance(reg, dict):
-        merged = DEFAULT_ANCHOR.copy()
-        merged["anchor_id"] = "BTA-REGISTRY.01"
-        merged["anchor_name"] = "BTA Master Registry"
-        merged["governance_version"] = "CIAT25.1"
-        
-        vis_vectors = reg.get("visual_content_governance_and_style_vectors", [])
-        if isinstance(vis_vectors, list) and len(vis_vectors) > 0:
-            vectors_dict = {}
-            for i, vec in enumerate(vis_vectors):
-                # Dynamically map all vectors found in the registry (alpha, beta, gamma, etc.)
-                key = "alpha" if i == 0 else ("beta" if i == 1 else ("gamma" if i == 2 else f"vector_{i+1}"))
-                title = vec.get("name", f"Vector {i+1}")
-                desc = f"{vec.get('visual_parameters', '')} Color discipline: {vec.get('color_discipline', '')}"
-                vectors_dict[key] = {"title": title, "description": desc}
-            merged["vectors"] = vectors_dict
-            
-        merged["color_channels"] = {
-            "active": [
-                {"name": "crimson red", "hex": "#DC143C"},
-                {"name": "nature green", "hex": "#00FF7F"},
-                {"name": "royal gold", "hex": "#D4AF37"}
-            ],
-            "forbidden": ["laser blue", "generic blue glow", "electric blue", "cyan glow"]
-        }
-        return merged
-
+def load_anchor_from_text(content: str) -> dict:
     merged = DEFAULT_ANCHOR.copy()
-    merged["anchor_id"] = raw.get("anchor_id") or raw.get("id") or merged["anchor_id"]
-    merged["anchor_name"] = raw.get("anchor_name") or raw.get("name") or raw.get("title") or merged["anchor_name"]
-    merged["governance_version"] = raw.get("governance_version") or raw.get("version") or merged["governance_version"]
-    merged["tone"] = raw.get("tone") or raw.get("brand_tone") or merged["tone"]
-    
-    vecs = raw.get("vectors") or raw.get("style_vectors")
-    if isinstance(vecs, dict) and vecs:
-        merged["vectors"] = vecs
-        
-    cc = raw.get("color_channels") or raw.get("colors")
-    if isinstance(cc, dict):
-        merged["color_channels"] = cc
-    elif isinstance(cc, list):
-        merged["color_channels"] = {"active": cc, "forbidden": raw.get("forbidden_colors", [])}
-        
-    kr = raw.get("kelvin_range") or raw.get("kelvin")
-    if isinstance(kr, dict):
-        merged["kelvin_range"] = kr
-        
-    for k in ["materials", "geometry_overlays", "filler_phrases", "forbidden_elements", "competitor_names"]:
-        if k in raw and isinstance(raw[k], list):
-            merged[k] = raw[k]
-            
-    if "default_aspect" in raw:
-        merged["default_aspect"] = raw["default_aspect"]
-    elif "aspect_ratio" in raw:
-        merged["default_aspect"] = raw["aspect_ratio"]
-        
+    lines = content.splitlines()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            parts = line.split("=", 1)
+            k = parts[0].strip().lower()
+            v = parts[1].strip()
+            if k == "anchor_name":
+                merged["anchor_name"] = v
+            elif k == "anchor_id":
+                merged["anchor_id"] = v
+            elif k == "tone":
+                merged["tone"] = v
+            elif k == "governance_version":
+                merged["governance_version"] = v
+            elif k == "default_aspect":
+                merged["default_aspect"] = v
     return merged
 
-# ============================================================
-# DETERMINISTIC CORE
-# ============================================================
 def canonical(obj) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
 
@@ -283,7 +235,7 @@ anchor = st.session_state.anchor
 current_hash = anchor_hash(anchor)
 
 # ============================================================
-# SIDEBAR — LIVE TELEMETRY & UPLOADER
+# SIDEBAR — LIVE TELEMETRY & TEXT UPLOADER
 # ============================================================
 with st.sidebar:
     st.title("⬡ XX_LABS")
@@ -318,16 +270,16 @@ with st.sidebar:
     st.metric("FAIL verdicts", s["fails"])
     st.divider()
     
-    up = st.file_uploader("Load brand_anchor.json", type=["json"])
+    # Text file uploader replacing JSON parsing to bypass CPU throttling
+    up = st.file_uploader("Load brand anchor config (.txt)", type=["txt"])
     if up is not None:
         try:
             content = up.read().decode("utf-8")
-            raw_json = json.loads(content)
-            st.session_state.anchor = load_and_merge_json(raw_json)
-            st.success("Anchor file loaded and synced.")
+            st.session_state.anchor = load_anchor_from_text(content)
+            st.success("Anchor text file loaded and synced.")
             st.rerun()
         except Exception as e:
-            st.error(f"Invalid JSON file: {e}")
+            st.error(f"Invalid text file: {e}")
 
 # ============================================================
 # MAIN INTERFACE
@@ -359,7 +311,6 @@ with tab1:
     st.markdown("### Style Vectors (Dynamic Registry)")
     edited_vectors = {}
     
-    # Dynamically render inputs for ALL vectors present in the uploaded JSON schema (2, 3, or more)
     for v_key, v_data in vecs.items():
         st.markdown(f"**Vector ID: `{v_key}`**")
         vt = st.text_input(f"Title ({v_key})", value=v_data.get("title", ""), key=f"v_title_{v_key}_{current_hash}")
