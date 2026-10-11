@@ -1,3 +1,4 @@
+import copy
 import datetime
 import hashlib
 import json
@@ -51,91 +52,107 @@ DEFAULT_ANCHOR = {
     "default_aspect": "16:9"
 }
 
-def load_and_merge_json(raw: dict) -> dict:
+def new_default() -> dict:
+    return copy.deepcopy(DEFAULT_ANCHOR)
+
+def _vector_key(i: int) -> str:
+    return {0: "alpha", 1: "beta", 2: "gamma"}.get(i, f"vector_{i+1}")
+
+def load_and_merge_json(raw: dict):
+    """Returns (anchor, format_label)."""
     if not isinstance(raw, dict):
-        return DEFAULT_ANCHOR.copy()
-    
+        raise ValueError("Top-level JSON must be an object.")
+
+    # Format 1: BTA Master Registry (wrapped)
     reg = raw.get("bta_master_registry")
-    if reg and isinstance(reg, dict):
-        merged = DEFAULT_ANCHOR.copy()
+    if isinstance(reg, dict):
+        merged = new_default()
         merged["anchor_id"] = "BTA-REGISTRY.01"
         merged["anchor_name"] = "BTA Master Registry"
-        merged["governance_version"] = "CIAT25.1"
-        
-        vis_vectors = reg.get("visual_content_governance_and_style_vectors", [])
-        if isinstance(vis_vectors, list) and len(vis_vectors) > 0:
-            vectors_dict = {}
-            for i, vec in enumerate(vis_vectors):
-                key = "alpha" if i == 0 else ("beta" if i == 1 else ("gamma" if i == 2 else f"vector_{i+1}"))
-                title = vec.get("name", f"Vector {i+1}")
-                desc = f"{vec.get('visual_parameters', '')} Color discipline: {vec.get('color_discipline', '')}"
-                vectors_dict[key] = {"title": title, "description": desc}
-            merged["vectors"] = vectors_dict
-            
+        vis = reg.get("visual_content_governance_and_style_vectors", [])
+        if isinstance(vis, list) and vis:
+            vectors = {}
+            for i, vec in enumerate(vis):
+                if not isinstance(vec, dict):
+                    continue
+                # color_discipline is NOT embedded: it contains forbidden terms
+                # ("laser blue") that would trip the leak gate. Colors come from color_channels.
+                vectors[_vector_key(i)] = {
+                    "title": vec.get("name", f"Vector {i+1}"),
+                    "description": vec.get("visual_parameters", "")
+                }
+            if vectors:
+                merged["vectors"] = vectors
         merged["color_channels"] = {
             "active": [
                 {"name": "crimson red", "hex": "#DC143C"},
                 {"name": "nature green", "hex": "#00FF7F"},
                 {"name": "royal gold", "hex": "#D4AF37"}
             ],
-            "forbidden": ["laser blue", "generic blue glow", "electric blue", "cyan glow"]
+            "forbidden": ["laser blue", "neon blue", "generic blue glow", "electric blue", "cyan glow"]
         }
-        return merged
+        return merged, "BTA Master Registry"
 
-    merged = DEFAULT_ANCHOR.copy()
+    # Format 2: native anchor schema
+    merged = new_default()
     merged["anchor_id"] = raw.get("anchor_id") or raw.get("id") or merged["anchor_id"]
     merged["anchor_name"] = raw.get("anchor_name") or raw.get("name") or raw.get("title") or merged["anchor_name"]
     merged["governance_version"] = raw.get("governance_version") or raw.get("version") or merged["governance_version"]
     merged["tone"] = raw.get("tone") or raw.get("brand_tone") or merged["tone"]
-    
+
     vecs = raw.get("vectors") or raw.get("style_vectors")
     if isinstance(vecs, dict) and vecs:
         merged["vectors"] = vecs
-        
+
     cc = raw.get("color_channels") or raw.get("colors")
     if isinstance(cc, dict):
         merged["color_channels"] = cc
     elif isinstance(cc, list):
         merged["color_channels"] = {"active": cc, "forbidden": raw.get("forbidden_colors", [])}
-        
+
     kr = raw.get("kelvin_range") or raw.get("kelvin")
     if isinstance(kr, dict):
         merged["kelvin_range"] = kr
-        
+
     for k in ["materials", "geometry_overlays", "filler_phrases", "forbidden_elements", "competitor_names"]:
-        if k in raw and isinstance(raw[k], list):
+        if isinstance(raw.get(k), list):
             merged[k] = raw[k]
-            
+
     if "default_aspect" in raw:
         merged["default_aspect"] = raw["default_aspect"]
     elif "aspect_ratio" in raw:
         merged["default_aspect"] = raw["aspect_ratio"]
-        
-    return merged
 
-def parse_uploaded_anchor_file(content: str) -> dict:
+    return merged, "Native anchor schema"
+
+def parse_uploaded_anchor_file(data: bytes):
+    """Returns (anchor, format_label). Raises ValueError if nothing usable is found."""
+    content = data.decode("utf-8-sig")  # strips BOM, which silently broke json.loads before
     try:
-        raw_json = json.loads(content)
-        return load_and_merge_json(raw_json)
-    except Exception:
-        merged = DEFAULT_ANCHOR.copy()
-        for line in content.splitlines():
-            line = line.strip()
-            if "=" in line:
-                parts = line.split("=", 1)
-                k = parts[0].strip().lower()
-                v = parts[1].strip()
-                if k == "anchor_name":
-                    merged["anchor_name"] = v
-                elif k == "anchor_id":
-                    merged["anchor_id"] = v
-                elif k == "tone":
-                    merged["tone"] = v
-                elif k == "governance_version":
-                    merged["governance_version"] = v
-                elif k == "default_aspect":
-                    merged["default_aspect"] = v
-        return merged
+        return load_and_merge_json(json.loads(content))
+    except json.JSONDecodeError:
+        pass
+    # Tolerate junk around the JSON object
+    start, end = content.find("{"), content.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return load_and_merge_json(json.loads(content[start:end + 1]))
+        except json.JSONDecodeError:
+            pass
+    # key=value fallback
+    merged, hits = new_default(), 0
+    keymap = {"anchor_name": "anchor_name", "anchor_id": "anchor_id", "tone": "tone",
+              "governance_version": "governance_version", "default_aspect": "default_aspect"}
+    for line in content.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            k = k.strip().lower()
+            if k in keymap:
+                merged[keymap[k]] = v.strip()
+                hits += 1
+    if hits == 0:
+        raise ValueError("File is not valid JSON and contains no recognised key=value lines.")
+    return merged, "key=value fallback"
 
 def canonical(obj) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=False)
@@ -151,8 +168,7 @@ def purge_filler(text: str, anchor: dict):
     for phrase in sorted(phrases, key=len, reverse=True):
         if not phrase:
             continue
-        escaped_term = re.escape(str(phrase).strip())
-        pattern = re.compile(r"\b" + escaped_term + r"\b", re.IGNORECASE)
+        pattern = re.compile(r"\b" + re.escape(str(phrase).strip()) + r"\b", re.IGNORECASE)
         if pattern.search(cleaned):
             removed.append(phrase)
             cleaned = pattern.sub(" ", cleaned)
@@ -161,96 +177,90 @@ def purge_filler(text: str, anchor: dict):
 def purge_banned(text: str, anchor: dict):
     cc = anchor.get("color_channels", {})
     forbidden = cc.get("forbidden", []) if isinstance(cc, dict) else []
-    comps = anchor.get("competitor_names", [])
-    banned = list(forbidden) + list(comps)
+    banned = list(forbidden) + list(anchor.get("competitor_names", []))
     removed, cleaned = [], text
     for term in sorted([b for b in banned if b and str(b).strip()], key=len, reverse=True):
-        escaped_term = re.escape(str(term).strip())
-        pattern = re.compile(r"\b" + escaped_term + r"\b", re.IGNORECASE)
+        pattern = re.compile(r"\b" + re.escape(str(term).strip()) + r"\b", re.IGNORECASE)
         if pattern.search(cleaned):
             removed.append(term)
             cleaned = pattern.sub(" ", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip(" ,;."), removed
 
-def lock_parameters(intent: str, anchor: dict, vector_key: str, asset_type: str,
-                    platform: str, aspect: str, kelvin: int):
+def lock_parameters(intent, anchor, vector_key, asset_type, platform, aspect, kelvin):
     vectors = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
     vec = vectors.get(vector_key, list(vectors.values())[0])
-    
+
     active_cols = anchor.get("color_channels", {}).get("active", [])
     colors = ", ".join(c.get("name", "") for c in active_cols if isinstance(c, dict))
     hexes = ", ".join(c.get("hex", "") for c in active_cols if isinstance(c, dict))
-    
     mats = ", ".join(anchor.get("materials", []))
     geo = ", ".join(anchor.get("geometry_overlays", []))
-    
+
     k = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
     kelvin = min(max(kelvin, k.get("min", 3200)), k.get("max", 5600))
-    
+
     base = (f"{intent} — {vec.get('description', '')} Color channels: {colors} ({hexes}). "
             f"Lighting locked at {kelvin}K. Materials: {mats}. Overlays: {geo}.")
-    
+
     negatives = ", ".join(anchor.get("color_channels", {}).get("forbidden", [])[:3] +
                           ["style drift", "brand dilution", "generic filler"])
-    
+
     if platform == "Midjourney":
-        prompt = f"{base} --no {negatives} --ar {aspect.replace(':', ':')}"
+        prompt = f"{base} --no {negatives} --ar {aspect}"
     elif platform in ("Runway", "Kling"):
         motion = ("Slow orbital camera move, motion-start framing, energy pulses traveling "
                   "through the geometric overlays in approved color channels only.")
         prompt = f"{base} {motion}" if asset_type == "motion" else base
     else:
         prompt = base
-        
+
     if asset_type == "copy":
         prompt = (f"[COPY BRIEF | tone: {anchor.get('tone', '')}] Subject: {intent}. Voice: locked to anchor. "
                   f"Forbidden: {', '.join(anchor.get('forbidden_elements', []))}.")
-                  
+
     return prompt, negatives, {"kelvin_locked": kelvin, "aspect": aspect, "vector": vec.get("title", vector_key)}
 
-def validate(intent: str, prompt: str, anchor: dict, removed_banned, asset_type: str = "still"):
+def validate(intent, prompt, anchor, removed_banned, asset_type="still"):
     checks = []
     checks.append(("Subject preserved", bool(intent), "asset_intent empty after scrubbing — BLOCKED"))
     body = prompt.split("--no")[0].lower()
-    
+
     leaks = [t for t in anchor.get("color_channels", {}).get("forbidden", [])
              if re.search(r"\b" + re.escape(t.lower()) + r"\b", body)]
     checks.append(("Zero forbidden color channels (positive body)", not leaks, f"leaked: {leaks}" if leaks else "clean"))
-    
+
     comps = [t for t in anchor.get("competitor_names", []) if t and t.lower() in body]
     checks.append(("Zero competitor references", not comps, f"found: {comps}" if comps else "clean"))
-    
+
     checks.append(("Style vector locked", "—" in prompt or "[COPY BRIEF" in prompt, "vector description embedded"))
-    
+
     if asset_type == "copy":
         tone_ok = anchor.get("tone", "").split(",")[0].strip().lower() in body
         checks.append(("Tone lock embedded", tone_ok, "anchor tone in brief header"))
     else:
-        active = [c.get("name", "") for c in anchor.get("color_channels", {}).get("active", []) if isinstance(c, dict) and c.get("name", "").lower() in body]
+        active = [c.get("name", "") for c in anchor.get("color_channels", {}).get("active", [])
+                  if isinstance(c, dict) and c.get("name", "").lower() in body]
         checks.append(("Approved color channel locked", len(active) >= 1, f"locked: {active}"))
-        
+
         kr = anchor.get("kelvin_range", {})
         m = re.search(r"(\d{4})K", prompt)
         kelvin_ok = bool(m) and kr.get("min", 0) <= int(m.group(1)) <= kr.get("max", 9999)
         checks.append(("Kelvin within lock range", kelvin_ok,
                        f"{m.group(1)}K in {kr.get('min')}–{kr.get('max')}K" if m else "no Kelvin value found"))
-                       
-    drift_flag = "drift detected & purged" if removed_banned else "input clean"
-    checks.append(("Drift interception report", True, drift_flag))
-    passed = all(c[1] for c in checks)
-    return checks, ("PASS" if passed else "FAIL")
+
+    checks.append(("Drift interception report", True, "drift detected & purged" if removed_banned else "input clean"))
+    return checks, ("PASS" if all(c[1] for c in checks) else "FAIL")
 
 def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin):
     step1, filler_hits = purge_filler(raw, anchor)
     step2, banned_hits = purge_banned(step1, anchor)
     prompt, negatives, locks = lock_parameters(step2, anchor, vector_key, asset_type, platform, aspect, kelvin)
     checks, status = validate(step2, prompt, anchor, banned_hits, asset_type)
-    
+
     vectors = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
     vec_title = vectors.get(vector_key, {}).get("title", vector_key)
-    
     active_cols = [c.get("name") for c in anchor.get("color_channels", {}).get("active", []) if isinstance(c, dict)]
-    
+
     payload = {
         "xxlabs_bta_version": anchor.get("governance_version", "CIAT25.1"),
         "anchor_id": anchor.get("anchor_id", "BTA-XXL.01"),
@@ -279,14 +289,39 @@ def process_brief(raw, anchor, vector_key, asset_type, platform, aspect, kelvin)
     }
     return payload, status
 
+# ---------------- session state ----------------
 if "anchor" not in st.session_state:
-    st.session_state.anchor = DEFAULT_ANCHOR.copy()
-
+    st.session_state.anchor = new_default()
+if "anchor_source" not in st.session_state:
+    st.session_state.anchor_source = "built-in default"
+if "last_upload" not in st.session_state:
+    st.session_state.last_upload = None
+if "uploader_nonce" not in st.session_state:
+    st.session_state.uploader_nonce = 0
 if "stats" not in st.session_state:
     st.session_state.stats = {"briefs": 0, "filler_purged": 0, "banned_purged": 0, "fails": 0}
-
 if "history" not in st.session_state:
     st.session_state.history = []
+
+# ---------------- upload handling (runs BEFORE anchor is read) ----------------
+# Process each distinct file exactly once. The old code called st.rerun() on every
+# run while the file was still in the uploader, so it looped and also overwrote forged edits.
+with st.sidebar:
+    up = st.file_uploader("Load brand anchor config (.txt / .json)", type=["txt", "json"],
+                          key=f"uploader_{st.session_state.uploader_nonce}")
+    if up is not None:
+        data = up.getvalue()
+        fid = hashlib.sha256(data).hexdigest()
+        if st.session_state.last_upload != fid:
+            try:
+                new_anchor, fmt = parse_uploaded_anchor_file(data)
+                st.session_state.anchor = new_anchor
+                st.session_state.anchor_source = f"{up.name} ({fmt})"
+                st.session_state.last_upload = fid
+                st.rerun()
+            except Exception as e:
+                st.session_state.last_upload = fid  # do not retry a bad file in a loop
+                st.error(f"Failed to load anchor: {e}")
 
 anchor = st.session_state.anchor
 current_hash = anchor_hash(anchor)
@@ -299,8 +334,16 @@ with st.sidebar:
     st.markdown(f"**ID:** `{anchor.get('anchor_id', 'N/A')}`")
     st.markdown(f"**Hash:** `{current_hash}`")
     st.markdown(f"**Version:** {anchor.get('governance_version','—')}")
+    st.markdown(f"**Source:** {st.session_state.anchor_source}")
+    st.markdown(f"**Vectors:** {len(anchor.get('vectors', {}))}")
+    if st.button("Reset to built-in default / re-enable upload"):
+        st.session_state.anchor = new_default()
+        st.session_state.anchor_source = "built-in default"
+        st.session_state.last_upload = None
+        st.session_state.uploader_nonce += 1
+        st.rerun()
     st.divider()
-    
+
     st.markdown("**Locked color channels**")
     for c in anchor.get("color_channels", {}).get("active", []):
         if isinstance(c, dict):
@@ -310,29 +353,18 @@ with st.sidebar:
                 f'{c.get("name", "")} (`{c.get("hex", "")}`)',
                 unsafe_allow_html=True
             )
-            
+
     kr = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
     st.markdown(f"**Kelvin lock:** {kr.get('min', 3200)}K – {kr.get('max', 5600)}K")
     st.markdown(f"**Default AR:** {anchor.get('default_aspect','16:9')}")
     st.divider()
-    
+
     st.markdown("**Session telemetry**")
     s = st.session_state.stats
     st.metric("Briefs governed", s["briefs"])
     st.metric("Filler terms purged", s["filler_purged"])
     st.metric("Banned tokens purged", s["banned_purged"])
     st.metric("FAIL verdicts", s["fails"])
-    st.divider()
-    
-    up = st.file_uploader("Load brand anchor config (.txt)", type=["txt"])
-    if up is not None:
-        try:
-            content = up.read().decode("utf-8")
-            st.session_state.anchor = parse_uploaded_anchor_file(content)
-            st.success("Anchor file loaded and synced.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Failed to parse file: {e}")
 
 st.title("XX_LABS — BTA Workbench")
 st.caption("Ambiguity is stripped. Parameters are locked. Verification runs on the prompt, not the pixels.")
@@ -342,13 +374,12 @@ tab1, tab2 = st.tabs(["① Forge / Edit Anchor", "② Govern a Brief"])
 with tab1:
     st.subheader("Anchor Interview — forge a Brand Truth Anchor")
     st.caption("The anchor is the product. Everything downstream is enforcement.")
-    
+
     vecs = anchor.get("vectors", {})
-    
     active_cols_list = anchor.get("color_channels", {}).get("active", [])
-    active_cols_str = "\n".join(f"{c['name']},{c['hex']}" for c in active_cols_list if isinstance(c, dict) and "name" in c and "hex" in c)
+    active_cols_str = "\n".join(f"{c['name']},{c['hex']}" for c in active_cols_list
+                                if isinstance(c, dict) and "name" in c and "hex" in c)
     forbidden_cols_str = ", ".join(anchor.get("color_channels", {}).get("forbidden", []))
-    
     mats_str = "\n".join(anchor.get("materials", []))
     geo_str = "\n".join(anchor.get("geometry_overlays", []))
     comp_str = ", ".join(anchor.get("competitor_names", []))
@@ -356,40 +387,42 @@ with tab1:
     c1, c2 = st.columns(2)
     a_name = c1.text_input("Anchor name", value=anchor.get("anchor_name", ""), key=f"name_{current_hash}")
     a_tone = c2.text_input("Locked tone", value=anchor.get("tone", ""), key=f"tone_{current_hash}")
-    
+
     st.markdown("### Style Vectors (Dynamic Registry)")
     edited_vectors = {}
-    
     for v_key, v_data in vecs.items():
         st.markdown(f"**Vector ID: `{v_key}`**")
         vt = st.text_input(f"Title ({v_key})", value=v_data.get("title", ""), key=f"v_title_{v_key}_{current_hash}")
-        vd = st.text_area(f"Description ({v_key})", value=v_data.get("description", ""), height=90, key=f"v_desc_{v_key}_{current_hash}")
+        vd = st.text_area(f"Description ({v_key})", value=v_data.get("description", ""), height=90,
+                          key=f"v_desc_{v_key}_{current_hash}")
         edited_vectors[v_key] = {"title": vt, "description": vd}
         st.divider()
-    
+
     st.markdown("**Color channels** (name,hex — one per line)")
     active_lines = st.text_area("Active (locked) channels", value=active_cols_str, height=90, key=f"active_{current_hash}")
-    forbidden_cols = st.text_area("Forbidden channels (comma-separated)", value=forbidden_cols_str, height=60, key=f"forbidden_{current_hash}")
-    
+    forbidden_cols = st.text_area("Forbidden channels (comma-separated)", value=forbidden_cols_str, height=60,
+                                  key=f"forbidden_{current_hash}")
+
     kr1, kr2, ar = st.columns(3)
     k_min = kr1.number_input("Kelvin min", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("min", 3200)), key=f"kmin_{current_hash}")
     k_max = kr2.number_input("Kelvin max", 1000, 10000, value=int(anchor.get("kelvin_range", {}).get("max", 5600)), key=f"kmax_{current_hash}")
     a_ar = ar.text_input("Default aspect ratio", value=anchor.get("default_aspect", "16:9"), key=f"ar_{current_hash}")
-    
+
     a_mats = st.text_area("Materials (one per line)", value=mats_str, height=70, key=f"mats_{current_hash}")
     a_geo = st.text_area("Geometry overlays (one per line)", value=geo_str, height=60, key=f"geo_{current_hash}")
     a_comp = st.text_input("Competitor names to purge (comma-separated)", value=comp_str, key=f"comp_{current_hash}")
-    
-    if st.button("Forge Anchor → compute hash", type="primary"):
+
+    cA, cB = st.columns(2)
+    if cA.button("Forge Anchor → compute hash", type="primary"):
         def _lines(s): return [x.strip() for x in s.split("\n") if x.strip()]
         def _csv(s): return [x.strip() for x in s.split(",") if x.strip()]
-        
+
         cols = []
         for ln in _lines(active_lines):
             parts = [p.strip() for p in ln.split(",")]
             if len(parts) == 2:
                 cols.append({"name": parts[0], "hex": parts[1]})
-                
+
         new_anchor = {
             "anchor_id": anchor.get("anchor_id", "BTA-CUSTOM.01"),
             "anchor_name": a_name,
@@ -405,30 +438,35 @@ with tab1:
             "competitor_names": _csv(a_comp),
             "default_aspect": a_ar
         }
-        
         st.session_state.anchor = new_anchor
-        st.success(f"Anchor forged. Hash: `{anchor_hash(new_anchor)}`")
+        st.session_state.anchor_source = "forged in UI"
         st.rerun()
+
+    # Export lets the forged anchor round-trip back into an uploadable .txt
+    cB.download_button("Export current anchor (.txt)",
+                       json.dumps(anchor, indent=2, ensure_ascii=False),
+                       f"{anchor.get('anchor_id','anchor')}.txt", "text/plain")
 
 with tab2:
     st.subheader("Drift Interception — paste a messy brief")
     vectors = anchor.get("vectors", DEFAULT_ANCHOR["vectors"])
     vector_keys = list(vectors.keys())
-    
+
     g1, g2, g3, g4 = st.columns(4)
     vector_sel = g1.selectbox("Style vector", vector_keys,
                               format_func=lambda k: vectors.get(k, {}).get("title", k))
     asset_sel = g2.selectbox("Asset type", ["still", "motion", "copy"])
     platform_sel = g3.selectbox("Target engine", ["Midjourney", "Runway", "Kling", "Universal"])
-    ar_sel = g4.text_input("Aspect ratio", value=anchor.get("default_aspect", "16:9"))
-    
+    ar_sel = g4.text_input("Aspect ratio", value=anchor.get("default_aspect", "16:9"), key=f"ar_sel_{current_hash}")
+
     kr = anchor.get("kelvin_range", {"min": 3200, "max": 5600})
     kelvin_sel = st.slider("Lighting temperature (locked range)", 2000, 6500,
-                           int((kr.get("min", 3200) + kr.get("max", 5600)) / 2))
-                           
-    raw = st.text_area("Raw brief", placeholder="e.g. make an awesome epic 8k render of a futuristic processor, laser blue glow, very cool, cyberpunk vibe…",
+                           int((kr.get("min", 3200) + kr.get("max", 5600)) / 2), key=f"kelvin_{current_hash}")
+
+    raw = st.text_area("Raw brief",
+                       placeholder="e.g. make an awesome epic 8k render of a futuristic processor, laser blue glow, very cool, cyberpunk vibe…",
                        height=140)
-                       
+
     if st.button("Run Governance ⬡", type="primary") and raw.strip():
         payload, status = process_brief(raw, anchor, vector_sel, asset_sel, platform_sel, ar_sel, kelvin_sel)
         s = st.session_state.stats
@@ -437,19 +475,18 @@ with tab2:
         s["banned_purged"] += len(payload["governance_telemetry"]["banned_purged"])
         if status == "FAIL":
             s["fails"] += 1
-            
         st.session_state.history.append(payload)
 
         if status == "PASS":
             st.success("VALIDATION: **PASS** — all lexical gates green.")
         else:
             st.error("VALIDATION: **FAIL** — see failing checks below.")
-            
+
+        tel = payload["governance_telemetry"]
         m1, m2 = st.columns(2)
         with m1:
             st.markdown("**[Cleaned Asset Brief]**")
             st.write(payload["asset_intent"] or "*(empty — blocked)*")
-            tel = payload["governance_telemetry"]
             if tel["filler_purged"]:
                 st.caption("Filler purged: " + ", ".join(f"`{t}`" for t in tel["filler_purged"]))
             if tel["banned_purged"]:
@@ -458,8 +495,8 @@ with tab2:
             st.code(payload["execution_payload"]["prompt_string"], language="text")
         with m2:
             st.markdown("**Gate checks**")
-            for name, passed, detail in [(c["name"], c["passed"], c["detail"]) for c in tel["checks"]]:
-                st.markdown(f"{'✅' if passed else '❌'} **{name}** — {detail}")
+            for c in tel["checks"]:
+                st.markdown(f"{'✅' if c['passed'] else '❌'} **{c['name']}** — {c['detail']}")
             st.download_button("Download execution payload (.json)",
                                json.dumps(payload, indent=2, ensure_ascii=False),
                                f"xxlabs_payload_{payload['anchor_hash'].replace(':','')}.json",
